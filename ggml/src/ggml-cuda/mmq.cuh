@@ -1639,14 +1639,19 @@ void mul_mat_q_switch_J(ggml_backend_cuda_context & ctx, const mmq_args & args, 
 
     int64_t ncols_picker = args.ncols_max;
     if (args.expert_bounds != nullptr && args.nchannels_x > 0) {
-        const int J_max = ggml_cuda_mmq_get_J_max(type, fallback, cc, 128);
-        const ggml_cuda_mmq_config config_max = ggml_cuda_mmq_get_config(type, J_max, fallback, cc);
-        if (config_max.use_typical_moe_ncols) {
-            // Use the typical expert width only for tile selection.
-            // The launch grid still uses args.ncols_max.
-            const int64_t ncols_typical = (args.ncols_dst + args.nchannels_x - 1) / args.nchannels_x;
-            if (ncols_typical >= 1 && ncols_typical < J_max && ncols_typical < ncols_picker) {
-                ncols_picker = ncols_typical;
+        if (GGML_CUDA_CC_IS_RDNA3(cc)) {
+            const int64_t ncols_per_expert = (args.ncols_dst + args.nchannels_y - 1) / args.nchannels_y;
+            ncols_picker = std::min(2*ncols_per_expert, args.ncols_max);
+        } else {
+            const int J_max = ggml_cuda_mmq_get_J_max(type, fallback, cc, 128);
+            const ggml_cuda_mmq_config config_max = ggml_cuda_mmq_get_config(type, J_max, fallback, cc);
+            if (config_max.use_typical_moe_ncols) {
+                // Use the typical expert width only for tile selection.
+                // The launch grid still uses args.ncols_max.
+                const int64_t ncols_typical = (args.ncols_dst + args.nchannels_x - 1) / args.nchannels_x;
+                if (ncols_typical >= 1 && ncols_typical < J_max && ncols_typical < ncols_picker) {
+                    ncols_picker = ncols_typical;
+                }
             }
         }
     }
