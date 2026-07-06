@@ -312,8 +312,19 @@ static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_am
     return 0;
 }
 
+static constexpr __host__ __device__ uint32_t ggml_cuda_fattn_tile_get_config_amd_rdna3_5(const int DKQ, const int DV, const int ncols) {
+    // With rocWMMA FlashAttention off, D=256 prefill runs on the tile kernel; on RDNA3.5 a smaller
+    // K tile with higher occupancy is faster than the shared RDNA values. Other cases fall back.
+    GGML_CUDA_FATTN_TILE_CONFIG_CASE(256, 256, 32, 256, 4, 64, 64)
+
+    return ggml_cuda_fattn_tile_get_config_amd_rdna(DKQ, DV, ncols);
+}
+
 static __host__ uint32_t ggml_cuda_fattn_tile_get_config(const int DKQ, const int DV, const int ncols, const int cc) {
     if (GGML_CUDA_CC_IS_AMD(cc)) {
+        if (GGML_CUDA_CC_IS_RDNA3_5(cc)) {
+            return ggml_cuda_fattn_tile_get_config_amd_rdna3_5(DKQ, DV, ncols);
+        }
         if (GGML_CUDA_CC_IS_RDNA(cc)) {
             return ggml_cuda_fattn_tile_get_config_amd_rdna(DKQ, DV, ncols);
         }
@@ -327,11 +338,13 @@ static __host__ uint32_t ggml_cuda_fattn_tile_get_config(const int DKQ, const in
 
 static constexpr __device__ uint32_t ggml_cuda_fattn_tile_get_config(const int DKQ, const int DV, const int ncols) {
 #ifdef GGML_USE_HIP
-#ifdef RDNA
+#ifdef RDNA3_5
+    return ggml_cuda_fattn_tile_get_config_amd_rdna3_5(DKQ, DV, ncols);
+#elif defined(RDNA)
     return ggml_cuda_fattn_tile_get_config_amd_rdna(DKQ, DV, ncols);
 #else
     return ggml_cuda_fattn_tile_get_config_amd(DKQ, DV, ncols);
-#endif // RDNA
+#endif // RDNA3_5
 #else
 #ifdef FAST_FP16_AVAILABLE
     return ggml_cuda_fattn_tile_get_config_nvidia_fp16(DKQ, DV, ncols);
