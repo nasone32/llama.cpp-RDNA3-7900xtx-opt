@@ -5604,30 +5604,62 @@ struct ggml_tensor * ggml_flash_attn_back(
 
 // ggml_ssm_conv
 
-struct ggml_tensor * ggml_ssm_conv(
+// The input (sx) memory layout is selected by `layout` and stored in op_params[0].
+// The output is [d_inner, n_t, n_s] in both cases.
+static struct ggml_tensor * ggml_ssm_conv_impl(
         struct ggml_context * ctx,
         struct ggml_tensor  * sx,
-        struct ggml_tensor  * c) {
+        struct ggml_tensor  * c,
+        enum ggml_ssm_conv_layout layout) {
     GGML_ASSERT(ggml_is_3d(sx));
     GGML_ASSERT(ggml_is_matrix(c));
 
     const int64_t d_conv  = c->ne[0];
     const int64_t d_inner = c->ne[1];
-    const int64_t n_t     = sx->ne[0] - d_conv + 1; // tokens per sequence
     const int64_t n_s     = sx->ne[2];
 
+    // the time dimension index within sx depends on the layout
+    const int64_t time_ne = layout == GGML_SSM_CONV_LAYOUT_TIME_MAJOR ? sx->ne[0] : sx->ne[1];
+    const int64_t n_t     = time_ne - d_conv + 1; // tokens per sequence
+
     // TODO: maybe support other strides than 1?
-    GGML_ASSERT(sx->ne[0] == d_conv - 1 + n_t);
-    GGML_ASSERT(sx->ne[1] == d_inner);
+    if (layout == GGML_SSM_CONV_LAYOUT_TIME_MAJOR) {
+        GGML_ASSERT(sx->ne[0] == d_conv - 1 + n_t);
+        GGML_ASSERT(sx->ne[1] == d_inner);
+    } else {
+        GGML_ASSERT(sx->ne[0] == d_inner);
+        GGML_ASSERT(sx->ne[1] == d_conv - 1 + n_t);
+    }
     GGML_ASSERT(n_t >= 0);
 
     struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, d_inner, n_t, n_s);
+
+    ggml_set_op_params_i32(result, 0, (int32_t) layout);
 
     result->op     = GGML_OP_SSM_CONV;
     result->src[0] = sx;
     result->src[1] = c;
 
     return result;
+}
+
+struct ggml_tensor * ggml_ssm_conv(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * sx,
+        struct ggml_tensor  * c) {
+    return ggml_ssm_conv_impl(ctx, sx, c, GGML_SSM_CONV_LAYOUT_TIME_MAJOR);
+}
+
+struct ggml_tensor * ggml_ssm_conv_channels_major(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * sx,
+        struct ggml_tensor  * c) {
+    return ggml_ssm_conv_impl(ctx, sx, c, GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR);
+}
+
+enum ggml_ssm_conv_layout ggml_ssm_conv_get_layout(const struct ggml_tensor * op) {
+    GGML_ASSERT(op->op == GGML_OP_SSM_CONV);
+    return (enum ggml_ssm_conv_layout) ggml_get_op_params_i32(op, 0);
 }
 
 // ggml_ssm_scan

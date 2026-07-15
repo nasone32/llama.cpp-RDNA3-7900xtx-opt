@@ -4778,6 +4778,11 @@ static bool ggml_hexagon_supported_ssm_conv(const struct ggml_hexagon_session * 
     const struct ggml_tensor * src1 = op->src[1];
     const struct ggml_tensor * dst  = op;
 
+    // the channels-major input layout is only implemented on CPU/CUDA
+    if (ggml_ssm_conv_get_layout(op) != GGML_SSM_CONV_LAYOUT_TIME_MAJOR) {
+        return false;
+    }
+
     // Only support FP32 for now
     if (src0->type != GGML_TYPE_F32 || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         return false;

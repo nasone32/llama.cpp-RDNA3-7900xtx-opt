@@ -6145,8 +6145,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             }
         }
         case GGML_OP_SSM_CONV: {
-            // assumes d_inner % threads == 0
-            return op->src[0]->ne[1] % 128 == 0;
+            // assumes d_inner % threads == 0; d_inner is on ne[1] (time-major) or ne[0] (channels-major)
+            const bool channels_major = ggml_ssm_conv_get_layout(op) == GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR;
+            const int64_t d_inner = channels_major ? op->src[0]->ne[0] : op->src[0]->ne[1];
+            return d_inner % 128 == 0;
         }
         case GGML_OP_CONT:
             return true;

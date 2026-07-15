@@ -799,6 +799,15 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
     };
 
     auto handle_ssm_conv = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
+        if (ggml_ssm_conv_get_layout(tensor) == GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR) {
+            // channels-major: d_inner is sx (src0) axis 0 and c (src1) axis 1, so a d_inner
+            // split lands on different source axes; the output [d_inner, n_t, n_s] splits on axis 0.
+            if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0 && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_1) {
+                return {GGML_BACKEND_SPLIT_AXIS_0, {0}, {1}, 1};
+            }
+            return handle_generic(src_ss, /*scalar_only =*/ false);
+        }
+        // time-major: d_inner is axis 1 of both sx and c
         if (src_ss[0].axis == src_ss[1].axis) {
             if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
                 return {GGML_BACKEND_SPLIT_AXIS_1, {0}, {1}, 1};

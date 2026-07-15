@@ -2472,10 +2472,26 @@ extern "C" {
            struct ggml_tensor  * d,
            bool                  masked);
 
+    // memory layout of the ssm_conv input (sx), stored in op_params[0]
+    enum ggml_ssm_conv_layout {
+        GGML_SSM_CONV_LAYOUT_TIME_MAJOR     = 0, // sx = [d_conv-1+n_t, d_inner, n_s] (time contiguous)
+        GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR = 1, // sx = [d_inner, d_conv-1+n_t, n_s] (channels contiguous)
+    };
+
     GGML_API struct ggml_tensor * ggml_ssm_conv(
             struct ggml_context * ctx,
             struct ggml_tensor  * sx,
             struct ggml_tensor  * c);
+
+    // same as ggml_ssm_conv but sx is channels-major: [d_inner, d_conv-1+n_t, n_s]
+    // (channels contiguous). output layout is unchanged: [d_inner, n_t, n_s].
+    GGML_API struct ggml_tensor * ggml_ssm_conv_channels_major(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * sx,
+            struct ggml_tensor  * c);
+
+    // input (sx) memory layout of an SSM_CONV op (see enum ggml_ssm_conv_layout)
+    GGML_API enum ggml_ssm_conv_layout ggml_ssm_conv_get_layout(const struct ggml_tensor * op);
 
     GGML_API struct ggml_tensor * ggml_ssm_scan(
             struct ggml_context * ctx,

@@ -9709,16 +9709,28 @@ static void ggml_compute_forward_ssm_conv_f32(
     const int ith = params->ith;
     const int nth = params->nth;
 
-    const int nc  = src1->ne[0]; // d_conv
-    const int ncs = src0->ne[0]; // d_conv - 1 + n_t
-    const int nr  = src0->ne[1]; // d_inner
-    const int n_t =  dst->ne[1]; // tokens per sequence
-    const int n_s =  dst->ne[2]; // number of sequences in the batch
+    //   time-major     : src0 = [d_conv-1+n_t, d_inner, n_s] (time contiguous)
+    //   channels-major : src0 = [d_inner, d_conv-1+n_t, n_s] (channels contiguous)
+    // output is [d_inner, n_t, n_s] (channels contiguous) in both cases
+    const bool channels_major = ggml_ssm_conv_get_layout(dst) == GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR;
+
+    const int nc  = src1->ne[0];                                 // d_conv
+    const int ncs = channels_major ? src0->ne[1] : src0->ne[0];  // d_conv - 1 + n_t
+    const int nr  = channels_major ? src0->ne[0] : src0->ne[1];  // d_inner
+    const int n_t =  dst->ne[1];                                 // tokens per sequence
+    const int n_s =  dst->ne[2];                                 // number of sequences in the batch
 
     GGML_ASSERT( dst->ne[0] == nr);
-    GGML_ASSERT(src0->nb[0] == sizeof(float));
+    GGML_ASSERT(src0->nb[0] == sizeof(float));       // input is contiguous (either layout)
     GGML_ASSERT(src1->nb[0] == sizeof(float));
     GGML_ASSERT(src0->nb[1] == src0->ne[0]*sizeof(float));
+
+    // byte strides of the input to move one channel / one time step, per layout
+    const size_t chan_nb = channels_major ? src0->nb[0] : src0->nb[1];
+    const size_t time_nb = channels_major ? src0->nb[1] : src0->nb[0];
+    const int    chan_stride = chan_nb / sizeof(float);
+    const int    time_stride = time_nb / sizeof(float);
+    GGML_UNUSED(ncs);
 
     // rows per thread
     const int dr = (nr + nth - 1)/nth;
@@ -9730,13 +9742,11 @@ static void ggml_compute_forward_ssm_conv_f32(
 
     for (int i3 = 0; i3 < n_s; ++i3) {
         for (int i2 = 0; i2 < n_t; ++i2) {
-            // {d_conv - 1 + n_t, d_inner, n_seqs}
-            // sliding window
-            const float * s = (const float *) ((const char *) src0->data + ir0*(src0->nb[1]) + i2*(src0->nb[0]) + i3*(src0->nb[2])); // {d_conv, d_inner, n_s}
+            // sliding window over the time axis (starting at token i2)
+            const float * s = (const float *) ((const char *) src0->data + ir0*chan_nb + i2*time_nb + i3*(src0->nb[2]));
             const float * c = (const float *) ((const char *) src1->data + ir0*(src1->nb[1])); // {d_conv, d_inner}
             float * x = (float *) ((char *) dst->data + ir0*(dst->nb[0]) + i2*(dst->nb[1]) + i3*(dst->nb[2])); // {d_inner, n_t, n_s}
 
-            // TODO: transpose the output for smaller strides for big batches?
             // d_inner
             for (int i1 = 0; i1 < ir; ++i1) {
                 // rowwise dot product
@@ -9745,7 +9755,7 @@ static void ggml_compute_forward_ssm_conv_f32(
 
                 // d_conv
                 for (int i0 = 0; i0 < nc; ++i0) {
-                    sumf += s[i0 + i1*ncs] * c[i0 + i1*nc];
+                    sumf += s[i0*time_stride + i1*chan_stride] * c[i0 + i1*nc];
                 }
                 x[i1] = sumf;
             }

@@ -19144,7 +19144,8 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                 return true;
             }
         case GGML_OP_SSM_CONV:
-            return op->src[0]->type == GGML_TYPE_F32;
+            // the channels-major input layout is only implemented on CPU/CUDA
+            return op->src[0]->type == GGML_TYPE_F32 && ggml_ssm_conv_get_layout(op) == GGML_SSM_CONV_LAYOUT_TIME_MAJOR;
         case GGML_OP_CONV_TRANSPOSE_1D:
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_COL2IM_1D:

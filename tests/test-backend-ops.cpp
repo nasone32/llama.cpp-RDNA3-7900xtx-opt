@@ -4187,20 +4187,23 @@ struct test_ssm_conv : public test_case {
     const ggml_type type;
     const std::array<int64_t, 4> ne_a;
     const std::array<int64_t, 4> ne_b;
+    const bool channels_major;  // if true, ne_a is [d_inner, d_conv-1+n_t, n_s, 1]
 
     std::string vars() override {
-        return VARS_TO_STR3(type, ne_a, ne_b);
+        return VARS_TO_STR4(type, ne_a, ne_b, channels_major);
     }
 
     test_ssm_conv(ggml_type type = GGML_TYPE_F32,
             std::array<int64_t, 4> ne_a = {10, 10, 10, 1},
-            std::array<int64_t, 4> ne_b = {3, 3, 1, 1})
-        : type(type), ne_a(ne_a), ne_b(ne_b) {}
+            std::array<int64_t, 4> ne_b = {3, 3, 1, 1},
+            bool channels_major = false)
+        : type(type), ne_a(ne_a), ne_b(ne_b), channels_major(channels_major) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * a   = ggml_new_tensor(ctx, type, 4, ne_a.data());
         ggml_tensor * b   = ggml_new_tensor(ctx, type, 4, ne_b.data());
-        ggml_tensor * out = ggml_ssm_conv(ctx, a, b);
+        ggml_tensor * out = channels_major ? ggml_ssm_conv_channels_major(ctx, a, b)
+                                           : ggml_ssm_conv(ctx, a, b);
         return out;
     }
 };
@@ -9408,6 +9411,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             // long token (n_t > 32, exercises the long_token kernel path)
             test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_conv - 1 + 64, d_inner, 1, 1}, {d_conv, d_inner, 1, 1}));
             test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_conv - 1 + 64, d_inner, 4, 1}, {d_conv, d_inner, 1, 1}));
+
+            // channels-major input: ne_a is [d_inner, d_conv-1+n_t, n_s, 1]
+            test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_inner, d_conv, 1, 1}, {d_conv, d_inner, 1, 1}, true));
+            test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_inner, 2 * d_conv, 1, 1}, {d_conv, d_inner, 1, 1}, true));
+            test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_inner, d_conv, 4, 1}, {d_conv, d_inner, 1, 1}, true));
+            // long token (n_t > 32, exercises the long_token kernel path)
+            test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_inner, d_conv - 1 + 64, 1, 1}, {d_conv, d_inner, 1, 1}, true));
+            test_cases.emplace_back(new test_ssm_conv(GGML_TYPE_F32, {d_inner, d_conv - 1 + 64, 4, 1}, {d_conv, d_inner, 1, 1}, true));
         }
     }
 

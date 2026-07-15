@@ -4566,7 +4566,8 @@ static bool ggml_backend_webgpu_device_supports_op(ggml_backend_dev_t dev, const
                           (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16);
             break;
         case GGML_OP_SSM_CONV:
-            supports_op = op->type == GGML_TYPE_F32;
+            // the channels-major input layout is only implemented on CPU/CUDA
+            supports_op = op->type == GGML_TYPE_F32 && ggml_ssm_conv_get_layout(op) == GGML_SSM_CONV_LAYOUT_TIME_MAJOR;
             break;
         case GGML_OP_SSM_SCAN:
             supports_op = op->type == GGML_TYPE_F32 &&

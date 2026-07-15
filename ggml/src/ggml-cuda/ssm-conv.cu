@@ -2,7 +2,11 @@
 #include "ssm-conv.cuh"
 #include "unary.cuh"
 
-template <bool apply_silu, size_t split_d_inner, size_t d_conv>
+// channels_major selects the input (src0) memory layout:
+//   false = time-major     : src0 = [d_conv-1+n_t, d_inner, n_s], time contiguous (nb0)
+//   true  = channels-major : src0 = [d_inner, d_conv-1+n_t, n_s], channels contiguous (nb0)
+// The output (dst) is [d_inner, n_t, n_s] (channels contiguous) in both cases.
+template <bool apply_silu, bool channels_major, size_t split_d_inner, size_t d_conv>
 static __global__ void ssm_conv_f32(const float * src0_ptr, const float * src1_ptr,
                                     const float * bias_ptr,
                                     const int src0_nb0, const int src0_nb1, const int src0_nb2, const int src1_nb1,
@@ -13,18 +17,22 @@ static __global__ void ssm_conv_f32(const float * src0_ptr, const float * src1_p
     const float * GGML_CUDA_RESTRICT src1 = src1_ptr;
     const float * GGML_CUDA_RESTRICT bias = bias_ptr;
     float       * GGML_CUDA_RESTRICT dst  = dst_ptr;
-    GGML_UNUSED(src0_nb0);
     const int tid  = threadIdx.x;
     const int bidx = blockIdx.x;
     const int bidy = blockIdx.y;
 
-    const float * x_block = (const float *) ((const char *) src0 + bidx * src0_nb2 + bidy * split_d_inner * src0_nb1);
+    // byte strides of the input to move one channel / one time step, per layout
+    const int chan_nb = channels_major ? src0_nb0 : src0_nb1;
+    const int time_nb = channels_major ? src0_nb1 : src0_nb0;
+
+    const float * x_block = (const float *) ((const char *) src0 + bidx * src0_nb2 + bidy * split_d_inner * chan_nb);
     const float * w_block = (const float *) ((const char *) src1 + bidy * split_d_inner * src1_nb1);
     float *       y_block = (float *) ((char *) dst + bidx * dst_nb2 + bidy * split_d_inner * dst_nb0);
 
-    const int stride_x = src0_nb1 / sizeof(float);
-    const int stride_w = src1_nb1 / sizeof(float);
-    const int stride_y = dst_nb1 / sizeof(float);
+    const int stride_xc = chan_nb / sizeof(float);   // stride to the next channel
+    const int stride_xt = time_nb / sizeof(float);   // stride to the next time step
+    const int stride_w  = src1_nb1 / sizeof(float);
+    const int stride_y  = dst_nb1 / sizeof(float);
 
     float x[d_conv] = { 0.0f };
     float w[d_conv] = { 0.0f };
@@ -42,10 +50,10 @@ static __global__ void ssm_conv_f32(const float * src0_ptr, const float * src1_p
 
         if (i == 0) {
             for (size_t j = 0; j < d_conv; j++) {
-                x[j] = x_block[tid * stride_x + j];
+                x[j] = x_block[tid * stride_xc + j * stride_xt];
             }
         } else {
-            x[(i - 1) % d_conv] = x_block[tid * stride_x + i + d_conv - 1];
+            x[(i - 1) % d_conv] = x_block[tid * stride_xc + (i + d_conv - 1) * stride_xt];
         }
 
 #pragma unroll
@@ -57,7 +65,7 @@ static __global__ void ssm_conv_f32(const float * src0_ptr, const float * src1_p
     }
 }
 
-template <bool apply_silu, size_t split_d_inner, size_t d_conv, int64_t split_n_t>
+template <bool apply_silu, bool channels_major, size_t split_d_inner, size_t d_conv, int64_t split_n_t>
 static __global__ void ssm_conv_long_token_f32(const float * __restrict__ src0, const float * __restrict__ src1,
                                                const float * __restrict__ bias,
                                                const int src0_nb0, const int src0_nb1, const int src0_nb2,
@@ -68,15 +76,19 @@ static __global__ void ssm_conv_long_token_f32(const float * __restrict__ src0, 
     const int bidy = blockIdx.y;
     const int bidz = blockIdx.z;
 
-    const float * x_block = (const float *) ((const char *) src0 + bidx * src0_nb2 + bidy * split_d_inner * src0_nb1 +
-                                             bidz * split_n_t * src0_nb0);
+    const int chan_nb = channels_major ? src0_nb0 : src0_nb1;
+    const int time_nb = channels_major ? src0_nb1 : src0_nb0;
+
+    const float * x_block = (const float *) ((const char *) src0 + bidx * src0_nb2 + bidy * split_d_inner * chan_nb +
+                                             bidz * split_n_t * time_nb);
     const float * w_block = (const float *) ((const char *) src1 + bidy * split_d_inner * src1_nb1);
     float *       y_block =
         (float *) ((char *) dst + bidx * dst_nb2 + bidz * split_n_t * dst_nb1 + bidy * split_d_inner * dst_nb0);
 
-    const int stride_x = src0_nb1 / sizeof(float);
-    const int stride_w = src1_nb1 / sizeof(float);
-    const int stride_y = dst_nb1 / sizeof(float);
+    const int stride_xc = chan_nb / sizeof(float);   // stride to the next channel
+    const int stride_xt = time_nb / sizeof(float);   // stride to the next time step
+    const int stride_w  = src1_nb1 / sizeof(float);
+    const int stride_y  = dst_nb1 / sizeof(float);
 
     const int64_t local_n_t = min(split_n_t, n_t - bidz * split_n_t);
     const int     n_cols    = d_conv - 1 + split_n_t;
@@ -84,20 +96,31 @@ static __global__ void ssm_conv_long_token_f32(const float * __restrict__ src0, 
     extern __shared__ float smem[];
 
     constexpr int load_cols   = d_conv - 1 + split_n_t;
-    constexpr int total_elems = split_d_inner * load_cols;
-    int row = tid / load_cols;
-    int col = tid % load_cols;
+    if (channels_major) {
+        // channels are contiguous: each thread streams its own channel over the
+        // time tile, so consecutive threads read consecutive addresses (coalesced).
 #pragma unroll
-    for (int idx = 0; idx < total_elems; idx += split_d_inner) {
-        if (row < (int)split_d_inner) {
-            smem[row * n_cols + col] = x_block[row * stride_x + col];
+        for (int col = 0; col < load_cols; col++) {
+            smem[tid * n_cols + col] = x_block[tid * stride_xc + col * stride_xt];
         }
+    } else {
+        // time is contiguous: distribute the [channel, time] tile across threads
+        // so that consecutive threads read consecutive (time) addresses (coalesced).
+        constexpr int total_elems = split_d_inner * load_cols;
+        int row = tid / load_cols;
+        int col = tid % load_cols;
+#pragma unroll
+        for (int idx = 0; idx < total_elems; idx += split_d_inner) {
+            if (row < (int)split_d_inner) {
+                smem[row * n_cols + col] = x_block[row * stride_xc + col * stride_xt];
+            }
 
-        col += split_d_inner;
-        row += col / load_cols;
-        col  = col % load_cols;
-        if (idx >= total_elems - tid - split_d_inner) {
-            break;
+            col += split_d_inner;
+            row += col / load_cols;
+            col  = col % load_cols;
+            if (idx >= total_elems - tid - split_d_inner) {
+                break;
+            }
         }
     }
     __syncthreads();
@@ -123,7 +146,7 @@ static __global__ void ssm_conv_long_token_f32(const float * __restrict__ src0, 
     }
 }
 
-template <bool apply_silu>
+template <bool apply_silu, bool channels_major>
 static void ssm_conv_f32_cuda(const float * src0, const float * src1, const float * bias, const int src0_nb0, const int src0_nb1,
                               const int src0_nb2, const int src1_nb1, float * dst, const int dst_nb0, const int dst_nb1,
                               const int dst_nb2, const int64_t nc, const int64_t nr, const int64_t n_t,
@@ -136,13 +159,13 @@ static void ssm_conv_f32_cuda(const float * src0, const float * src1, const floa
         if (n_t <= 32) {
             const dim3 blocks(n_s, (nr + threads - 1) / threads, 1);
             const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks, threads, 0, stream);
-            ggml_cuda_kernel_launch(ssm_conv_f32<apply_silu, threads, kNC>, launch_params, src0, src1, bias, src0_nb0, src0_nb1,
+            ggml_cuda_kernel_launch(ssm_conv_f32<apply_silu, channels_major, threads, kNC>, launch_params, src0, src1, bias, src0_nb0, src0_nb1,
                                                                         src0_nb2, src1_nb1, dst, dst_nb0, dst_nb1, dst_nb2, n_t);
         } else {
             const int64_t split_n_t = 32;
             dim3          blocks(n_s, (nr + threads - 1) / threads, (n_t + split_n_t - 1) / split_n_t);
             const size_t  smem_size = threads * (kNC - 1 + split_n_t) * sizeof(float);
-            ssm_conv_long_token_f32<apply_silu, threads, kNC, split_n_t><<<blocks, threads, smem_size, stream>>>(
+            ssm_conv_long_token_f32<apply_silu, channels_major, threads, kNC, split_n_t><<<blocks, threads, smem_size, stream>>>(
                 src0, src1, bias, src0_nb0, src0_nb1, src0_nb2, src1_nb1, dst, dst_nb0, dst_nb1, dst_nb2, n_t);
         }
     };
@@ -172,13 +195,15 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
     // When fusing, write to silu_dst (the node downstream references).
     const struct ggml_tensor * out = fuse_silu ? silu_dst : dst;
 
-    const int64_t nc  = src1->ne[0];                // d_conv
-    const int64_t nr  = src0->ne[1];                // d_inner
-    const int64_t n_t = out->ne[1];                 // tokens per sequence
-    const int64_t n_s = out->ne[2];                 // number of sequences in the batch
+    const bool channels_major = ggml_ssm_conv_get_layout(dst) == GGML_SSM_CONV_LAYOUT_CHANNELS_MAJOR;
+
+    const int64_t nc  = src1->ne[0];                                // d_conv
+    const int64_t nr  = channels_major ? src0->ne[0] : src0->ne[1]; // d_inner
+    const int64_t n_t = out->ne[1];                                 // tokens per sequence
+    const int64_t n_s = out->ne[2];                                 // number of sequences in the batch
 
     GGML_ASSERT(out->ne[0] == nr);
-    GGML_ASSERT(src0->nb[0] == sizeof(float));
+    GGML_ASSERT(src0->nb[0] == sizeof(float));      // input is contiguous (either layout)
     GGML_ASSERT(src1->nb[0] == sizeof(float));
     GGML_ASSERT(src0->nb[1] == src0->ne[0] * sizeof(float));
 
@@ -197,10 +222,20 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst, g
     }
 
     if (fuse_silu) {
-        ssm_conv_f32_cuda<true>(src0_d, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d, out->nb[0], out->nb[1],
-                          out->nb[2], nc, nr, n_t, n_s, stream);
+        if (channels_major) {
+            ssm_conv_f32_cuda<true, true>(src0_d, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d, out->nb[0], out->nb[1],
+                              out->nb[2], nc, nr, n_t, n_s, stream);
+        } else {
+            ssm_conv_f32_cuda<true, false>(src0_d, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d, out->nb[0], out->nb[1],
+                              out->nb[2], nc, nr, n_t, n_s, stream);
+        }
     } else {
-        ssm_conv_f32_cuda<false>(src0_d, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d, out->nb[0], out->nb[1],
-                          out->nb[2], nc, nr, n_t, n_s, stream);
+        if (channels_major) {
+            ssm_conv_f32_cuda<false, true>(src0_d, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d, out->nb[0], out->nb[1],
+                              out->nb[2], nc, nr, n_t, n_s, stream);
+        } else {
+            ssm_conv_f32_cuda<false, false>(src0_d, src1_d, bias_d, src0->nb[0], src0->nb[1], src0->nb[2], src1->nb[1], dst_d, out->nb[0], out->nb[1],
+                              out->nb[2], nc, nr, n_t, n_s, stream);
+        }
     }
 }
