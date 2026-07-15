@@ -469,6 +469,12 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
     qkv_mixed = ggml_transpose(ctx0, qkv_mixed);
     cb(qkv_mixed, "qkv_mixed_transposed", il);
 
+    // Materialize the transpose so ggml_concat sees two contiguous inputs and takes
+    // the coalesced concat_cont path instead of the strided concat_non_cont kernel,
+    // which scales super-linearly with chunk size for the delta-net conv-state prepend.
+    qkv_mixed = ggml_cont(ctx0, qkv_mixed);
+    cb(qkv_mixed, "qkv_mixed_cont", il);
+
     ggml_tensor * conv_input = ggml_concat(ctx0, conv_states, qkv_mixed, 0);
     cb(conv_input, "conv_input", il);
 
