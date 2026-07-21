@@ -1025,6 +1025,7 @@ static __global__ void mul_mat_q(
         const uint3 channel_ratio, const uint3 nchannels_y, const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
         const uint3 sample_ratio, const uint3 nsamples_y, const int stride_sample_x, const int stride_sample_y, const int stride_sample_dst,
         const uint3 ntx,
+        const int32_t * __restrict__ block_expert, const int32_t * __restrict__ block_start, const int n_experts,
         const char * __restrict__ x_gate = nullptr, const ggml_glu_op glu_op = GGML_GLU_OP_COUNT, const float glu_limit = 0.0f) {
 
     // Skip unused template specializations for faster compilation:
@@ -1037,6 +1038,8 @@ static __global__ void mul_mat_q(
     constexpr int nwarps    = ggml_cuda_mmq_get_nthreads(type, J, fallback) / warp_size;
     constexpr int qk        = ggml_cuda_type_traits<type>::qk;
     constexpr int I         = ggml_cuda_mmq_get_I(type, J, fallback);
+
+    GGML_UNUSED_VARS(block_expert, block_start, n_experts);
 
     const uint32_t nty = (nrows_x + I - 1) / I; // Number of tiles y
 
@@ -1057,11 +1060,24 @@ static __global__ void mul_mat_q(
     __syncthreads();
 
     if constexpr (!ggml_cuda_mmq_get_stream_k(type, J, fallback)) {
-        const uint2 tmp2 = fast_div_modulo(blockIdx.z, nchannels_y);
-        const int wt = tmp2.x;
-        const int zt = tmp2.y;
-        const int jt = blockIdx.y;
+        int wt;
+        int zt;
+        int jt;
         const int it = blockIdx.x;
+        if (block_expert != nullptr) {
+            const int m_block = blockIdx.y;
+            if (m_block >= block_start[n_experts]) {
+                return;
+            }
+            zt = block_expert[m_block];
+            jt = m_block - block_start[zt];
+            wt = 0;
+        } else {
+            const uint2 tmp2 = fast_div_modulo(blockIdx.z, nchannels_y);
+            wt = tmp2.x;
+            zt = tmp2.y;
+            jt = blockIdx.y;
+        }
 
         // Defaults for regular matrix multiplication:
         int col_low    = 0;
@@ -1462,6 +1478,51 @@ static size_t mmq_get_nbytes_shared(const ggml_cuda_mmq_config & config, const i
     return nbs_ids + nbs_x + GGML_PAD(nbs_y, config.nthreads*sizeof(int));
 }
 
+static constexpr int MMQ_MAX_GRIDDIM_Y = 65535;
+
+static __global__ void mmq_build_moe_block_map(
+        const int32_t * __restrict__ expert_bounds, const int n_experts, const int J,
+        int32_t * __restrict__ block_start, int32_t * __restrict__ block_expert) {
+    extern __shared__ int s_start[];
+    const int tid = threadIdx.x;
+
+    for (int e = tid; e < n_experts; e += blockDim.x) {
+        const int count = expert_bounds[e + 1] - expert_bounds[e];
+        s_start[e] = (count + J - 1) / J;
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        int sum = 0;
+        for (int e = 0; e < n_experts; ++e) {
+            const int count = s_start[e];
+            s_start[e] = sum;
+            sum += count;
+        }
+        s_start[n_experts] = sum;
+    }
+    __syncthreads();
+
+    for (int e = tid; e <= n_experts; e += blockDim.x) {
+        block_start[e] = s_start[e];
+    }
+
+    const int total = s_start[n_experts];
+    for (int m = tid; m < total; m += blockDim.x) {
+        int lo = 0;
+        int hi = n_experts;
+        while (lo < hi) {
+            const int mid = (lo + hi) >> 1;
+            if (s_start[mid] <= m) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        block_expert[m] = lo - 1;
+    }
+}
+
 template <ggml_type type, int J, bool fallback, bool has_gate = false>
 static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     const int id = ggml_cuda_get_device();
@@ -1497,12 +1558,36 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     const uint3 sample_ratio_fd    = init_fastdiv_values(sample_ratio);
 
     if (!ggml_cuda_mmq_get_stream_k(type, J, fallback, cc)) {
-        mul_mat_q<type, J, fallback, has_gate><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
+        const bool use_compact = args.expert_bounds != nullptr && GGML_CUDA_CC_IS_RDNA3(cc);
+        const int32_t * block_expert_ptr = nullptr;
+        const int32_t * block_start_ptr  = nullptr;
+        int n_experts = 0;
+        dim3 block_nums = block_nums_xy_tiling;
+
+        ggml_cuda_pool & pool = ctx.pool(id);
+        ggml_cuda_pool_alloc<int32_t> block_start(pool);
+        ggml_cuda_pool_alloc<int32_t> block_expert(pool);
+        if (use_compact) {
+            n_experts = args.nchannels_y;
+            const int64_t max_m_blocks = (args.ncols_dst + int64_t(n_experts)*(J - 1) + J - 1) / J;
+            if (max_m_blocks < MMQ_MAX_GRIDDIM_Y) {
+                block_start.alloc(n_experts + 1);
+                block_expert.alloc(max_m_blocks);
+                mmq_build_moe_block_map<<<1, 256, (n_experts + 1)*sizeof(int), stream>>>(
+                    args.expert_bounds, n_experts, J, block_start.ptr, block_expert.ptr);
+                block_expert_ptr = block_expert.ptr;
+                block_start_ptr  = block_start.ptr;
+                block_nums = dim3(nty, (unsigned) max_m_blocks, 1);
+            }
+        }
+
+        mul_mat_q<type, J, fallback, has_gate><<<block_nums, block_dims, nbytes_shared, stream>>>
             (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, nullptr, args.y_scale,
              blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
              channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
              sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
-             ntx_fd, has_gate ? args.x_gate : nullptr, args.glu_op, args.glu_limit);
+             ntx_fd, block_expert_ptr, block_start_ptr, n_experts,
+             has_gate ? args.x_gate : nullptr, args.glu_op, args.glu_limit);
         return;
     }
 
@@ -1533,7 +1618,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
          blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
          channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
          sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
-         ntx_fd);
+         ntx_fd, nullptr, nullptr, 0);
 
     if (!fixup_needed) {
         return;
