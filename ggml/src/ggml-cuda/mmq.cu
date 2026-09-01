@@ -82,8 +82,36 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
     }
 }
 
+// Fused gate+up+GLU dispatch (the mul_mat_id_glu_ops pattern). The fused
+// kernel is only instantiated for the types listed here; other types fall back
+// to the 3-op sequence via the try_fuse gate.
+static void ggml_cuda_mul_mat_q_switch_type_gate(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
+    switch (args.type_x) {
+        case GGML_TYPE_Q3_K:
+            mul_mat_q_case<GGML_TYPE_Q3_K, true>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q4_K:
+            mul_mat_q_case<GGML_TYPE_Q4_K, true>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q5_K:
+            mul_mat_q_case<GGML_TYPE_Q5_K, true>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q8_0:
+            mul_mat_q_case<GGML_TYPE_Q8_0, true>(ctx, args, stream);
+            break;
+        case GGML_TYPE_Q6_K:
+            mul_mat_q_case<GGML_TYPE_Q6_K, true>(ctx, args, stream);
+            break;
+        default:
+            fprintf(stderr, "gate type = %d\n", (int) args.type_x);
+            GGML_ABORT("fatal error: fused gate MMQ not implemented for this type");
+            break;
+    }
+}
+
 void ggml_cuda_mul_mat_q(
-        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst) {
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
+        const ggml_cuda_mm_fusion_args_host * fusion) {
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
     GGML_ASSERT(        dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(!ids || ids->type  == GGML_TYPE_I32); // Optional, used for batched GGML_MUL_MAT_ID.
@@ -252,6 +280,22 @@ void ggml_cuda_mul_mat_q(
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
         ne12};
+
+    if (fusion && fusion->gate) {
+        // fused gate+up: the gate weights share the up weights' shape, strides
+        // and ids mapping (verified in ggml_cuda_should_fuse_mul_mat), so only
+        // the base pointer differs. The kernel reads both streams with the same
+        // offset math and applies the GLU epilogue.
+        GGML_ASSERT(fusion->gate->type == src0->type);
+        GGML_ASSERT(fusion->gate->nb[1] == src0->nb[1] && fusion->gate->nb[2] == src0->nb[2] && fusion->gate->nb[3] == src0->nb[3]);
+        GGML_ASSERT(fusion->gate->ne[0] == src0->ne[0] && fusion->gate->ne[1] == src0->ne[1] && fusion->gate->ne[2] == src0->ne[2]);
+        mmq_args args_gate = args;
+        args_gate.x_gate   = (const char *) fusion->gate->data;
+        args_gate.glu_op   = fusion->glu_op;
+        args_gate.glu_limit = fusion->glu_limit;
+        ggml_cuda_mul_mat_q_switch_type_gate(ctx, args_gate, stream);
+        return;
+    }
 
     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
 }

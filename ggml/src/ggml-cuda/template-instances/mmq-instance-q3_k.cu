@@ -3,3 +3,4 @@
 #include "../mmq.cuh"
 
 DECL_MMQ_CASE(GGML_TYPE_Q3_K);
+DECL_MMQ_CASE_GATE(GGML_TYPE_Q3_K);
