@@ -73,6 +73,10 @@
 #define cudaGetDeviceProperties hipGetDeviceProperties
 #define cudaGetErrorString hipGetErrorString
 #define cudaGetLastError hipGetLastError
+#define cudaHostAlloc hipHostMalloc
+#define cudaHostAllocMapped hipHostMallocMapped
+#define cudaHostAllocPortable hipHostMallocPortable
+#define cudaHostGetDevicePointer hipHostGetDevicePointer
 #define cudaHostRegister hipHostRegister
 #define cudaHostRegisterPortable hipHostRegisterPortable
 #define cudaHostRegisterReadOnly hipHostRegisterReadOnly
