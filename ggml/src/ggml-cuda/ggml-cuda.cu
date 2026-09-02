@@ -1288,6 +1288,30 @@ static bool ggml_backend_cuda_comm_allreduce_tensor(void * comm_ctx_v, struct gg
     return comm_ctx->try_allreduce(comm_ctx, tensors);
 }
 
+static bool ggml_backend_cuda_comm_allreduce_tensor_fused_add(
+        void * comm_ctx_v, struct ggml_tensor ** tensors, struct ggml_tensor ** residuals, struct ggml_tensor ** outputs) {
+    if (comm_ctx_v == nullptr || getenv("GGML_CUDA_AR_FUSED_RESIDUAL") == nullptr) {
+        return false;
+    }
+    auto * comm_ctx = static_cast<ggml_backend_cuda_comm_context *>(comm_ctx_v);
+    if (comm_ctx->ar_pipeline == nullptr) {
+        return false;
+    }
+
+    const size_t n_backends = comm_ctx->backends.size();
+    for (size_t i = 0; i < n_backends; ++i) {
+        if (tensors[i] == nullptr || residuals[i] == nullptr || outputs[i] == nullptr ||
+            tensors[i]->type != GGML_TYPE_F32 || residuals[i]->type != GGML_TYPE_F32 || outputs[i]->type != GGML_TYPE_F32 ||
+            !ggml_are_same_shape(tensors[i], residuals[i]) || !ggml_are_same_shape(tensors[i], outputs[i]) ||
+            !ggml_is_contiguously_allocated(tensors[i]) || !ggml_is_contiguously_allocated(residuals[i]) ||
+            !ggml_is_contiguously_allocated(outputs[i])) {
+            return false;
+        }
+    }
+    return ggml_cuda_ar_allreduce_fused_add(
+        comm_ctx->ar_pipeline, comm_ctx->backends.data(), tensors, residuals, outputs);
+}
+
 // host buffer type
 
 static const char * ggml_backend_cuda_host_buffer_type_name(ggml_backend_buffer_type_t buft) {
@@ -6351,6 +6375,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_comm_allreduce_tensor") == 0) {
         return (void *)ggml_backend_cuda_comm_allreduce_tensor;
+    }
+    if (strcmp(name, "ggml_backend_comm_allreduce_tensor_fused_add") == 0) {
+        return (void *)ggml_backend_cuda_comm_allreduce_tensor_fused_add;
     }
     if (strcmp(name, "ggml_backend_register_host_buffer") == 0) {
         return (void *)ggml_backend_cuda_register_host_buffer;

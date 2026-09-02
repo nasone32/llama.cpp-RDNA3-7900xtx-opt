@@ -51,6 +51,10 @@ if (GGML_HIP_RCCL)
     find_package(rccl REQUIRED)
 endif()
 
+if (GGML_HIP_ROCTX)
+    find_package(rocprofiler-sdk-roctx REQUIRED CONFIG)
+endif()
+
 if (${hip_VERSION} VERSION_LESS 6.1)
     message(FATAL_ERROR "At least ROCM/HIP V6.1 is required")
 endif()
@@ -124,6 +128,11 @@ endif()
 
 if (GGML_HIP_EXPORT_METRICS)
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -Rpass-analysis=kernel-resource-usage --save-temps")
+endif()
+
+if (GGML_HIP_ROCTX)
+    target_compile_definitions(ggml-hip PRIVATE GGML_HIP_ROCTX)
+    target_link_libraries(ggml-hip PRIVATE rocprofiler-sdk-roctx::rocprofiler-sdk-roctx)
 endif()
 
 if (NOT GGML_CUDA_FA)

@@ -1809,6 +1809,7 @@ struct ggml_backend_meta_context {
 
     void *                               comm_ctx       = nullptr;
     ggml_backend_comm_allreduce_tensor_t comm_allreduce = nullptr;
+    ggml_backend_comm_allreduce_tensor_fused_add_t comm_allreduce_fused_add = nullptr;
 
     ggml_backend_meta_context(ggml_backend_dev_t meta_dev, const char * params) {
         const size_t n_devs = ggml_backend_meta_dev_n_devs(meta_dev);
@@ -1840,6 +1841,9 @@ struct ggml_backend_meta_context {
                 ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(
                     ggml_backend_get_device(simple_backends[0])), "ggml_backend_comm_allreduce_tensor");
             GGML_ASSERT(comm_allreduce != nullptr);
+            comm_allreduce_fused_add = (ggml_backend_comm_allreduce_tensor_fused_add_t)
+                ggml_backend_reg_get_proc_address(ggml_backend_dev_backend_reg(
+                    ggml_backend_get_device(simple_backends[0])), "ggml_backend_comm_allreduce_tensor_fused_add");
         }
     }
 
@@ -2436,14 +2440,26 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
     };
 
 
+    int skip_node = -1;
     for (size_t i = 0; i < backend_ctx->n_subgraphs; i++) {
         for (size_t j = 0; j < n_backends; j++) {
             auto & bcj = backend_ctx->backend_configs[j];
-            const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
+            ggml_cgraph * cgraph_compute = bcj.cgraphs[i].cgraph_main;
+            uint32_t flags = 0;
+            if (skip_node >= 0) {
+                GGML_ASSERT(skip_node < cgraph_compute->n_nodes);
+                flags = cgraph_compute->nodes[skip_node]->flags;
+                cgraph_compute->nodes[skip_node]->flags &= ~GGML_TENSOR_FLAG_COMPUTE;
+            }
+            const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, cgraph_compute);
+            if (skip_node >= 0) {
+                cgraph_compute->nodes[skip_node]->flags = flags;
+            }
             if (status != GGML_STATUS_SUCCESS) {
                 return status;
             }
         }
+        skip_node = -1;
 
         if (n_backends > 1 && i < backend_ctx->n_subgraphs - 1) {
             bool backend_allreduce_success = false;
@@ -2455,7 +2471,60 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                     ggml_cgraph * cgraph_ij = bcj.cgraphs[i].cgraph_main;
                     nodes.push_back(cgraph_ij->nodes[cgraph_ij->n_nodes-1]);
                 }
-                backend_allreduce_success = backend_ctx->comm_allreduce(backend_ctx->comm_ctx, nodes.data());
+
+                bool try_fused_add = backend_ctx->comm_allreduce_fused_add != nullptr &&
+                    getenv("GGML_CUDA_AR_FUSED_RESIDUAL") != nullptr;
+                std::vector<ggml_tensor *> residuals;
+                std::vector<ggml_tensor *> outputs;
+                const int i_next = backend_ctx->backend_configs[0].cgraphs[i + 1].offset;
+                int i_add = i_next;
+                if (try_fused_add) {
+                    ggml_tensor * node = cgraph->nodes[i_next - 1];
+                    const int i_next_end = i_next + backend_ctx->backend_configs[0].cgraphs[i + 1].cgraph_main->n_nodes;
+                    while (i_add < i_next_end && cgraph->nodes[i_add]->op == GGML_OP_RESHAPE &&
+                            cgraph->nodes[i_add]->src[0] == node && ggml_node_get_use_count(cgraph, i_add - 1) == 1) {
+                        node = cgraph->nodes[i_add++];
+                    }
+                    try_fused_add = i_add < i_next_end;
+                    ggml_tensor * add = try_fused_add ? cgraph->nodes[i_add] : nullptr;
+                    try_fused_add = try_fused_add && add->op == GGML_OP_ADD && ggml_node_get_use_count(cgraph, i_add - 1) == 1 &&
+                        ggml_are_same_shape(node, add) && node->type == GGML_TYPE_F32 && add->type == GGML_TYPE_F32 &&
+                        (add->src[0] == node || add->src[1] == node);
+                    if (try_fused_add) {
+                        ggml_tensor * residual = add->src[0] == node ? add->src[1] : add->src[0];
+                        try_fused_add = residual != nullptr && residual->type == GGML_TYPE_F32 &&
+                            ggml_are_same_shape(node, residual) &&
+                            ggml_backend_meta_get_split_state(residual, false).axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
+                            ggml_backend_meta_get_split_state(add, false).axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED;
+                    }
+                }
+                if (try_fused_add) {
+                    residuals.reserve(n_backends);
+                    outputs.reserve(n_backends);
+                    for (size_t j = 0; j < n_backends; j++) {
+                        auto & bcj = backend_ctx->backend_configs[j];
+                        ggml_cgraph * next = bcj.cgraphs[i + 1].cgraph_main;
+                        const int i_add_next = i_add - i_next;
+                        ggml_tensor * add = next->nodes[i_add_next];
+                        ggml_tensor * reduced = i_add_next == 0 ? nodes[j] : next->nodes[i_add_next - 1];
+                        ggml_tensor * residual = add->src[0] == reduced ? add->src[1] : add->src[0];
+                        if (add->op != GGML_OP_ADD || residual == nullptr ||
+                            !(add->src[0] == reduced || add->src[1] == reduced)) {
+                            try_fused_add = false;
+                            break;
+                        }
+                        residuals.push_back(residual);
+                        outputs.push_back(add);
+                    }
+                }
+                if (try_fused_add) {
+                    backend_allreduce_success = backend_ctx->comm_allreduce_fused_add(
+                        backend_ctx->comm_ctx, nodes.data(), residuals.data(), outputs.data());
+                    skip_node = backend_allreduce_success ? i_add - i_next : -1;
+                }
+                if (!backend_allreduce_success) {
+                    backend_allreduce_success = backend_ctx->comm_allreduce(backend_ctx->comm_ctx, nodes.data());
+                }
             }
 
             if (!backend_allreduce_success) {
