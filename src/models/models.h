@@ -2370,6 +2370,7 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * x,
                         int64_t   state_cols,
                         int64_t   channels,
+                           bool   channels_major,
                             int   il);
 
         ggml_tensor * build_inp_ple(

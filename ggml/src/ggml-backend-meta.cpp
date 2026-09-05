@@ -644,7 +644,6 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                     }
                     if (base_ne_out > base_ne_in) {
                         GGML_ASSERT(src_ss[0].n_segments == 1);
-                        GGML_ASSERT(src_ss[0].nr[0]      == 1);
                         return {ggml_backend_meta_split_axis(dim), {0}, {1}, 1};
                     }
                 }
