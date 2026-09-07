@@ -1673,6 +1673,7 @@ struct ggml_cuda_mm_fusion_args_host {
     // Index x_scale by the destination channel (token), not the source channel
     // (expert). Used for the MoE down x topk-weights fusion.
     bool x_scale_channel_dst = false;
+    uint32_t n_slots = 0;
     ggml_glu_op glu_op;
     float glu_limit = 0.0f;
 };

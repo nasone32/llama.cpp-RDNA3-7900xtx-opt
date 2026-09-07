@@ -4211,6 +4211,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             if (ggml_cuda_should_fuse_mul_mat_vec_f(up)) {
                 ggml_cuda_mm_fusion_args_host fusion_data{};
                 fusion_data.gate      = gate->src[0];
+                fusion_data.n_slots   = ggml_get_op_params_i32(up, 2);
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
                 fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
 
@@ -4240,6 +4241,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
                 ggml_cuda_mm_fusion_args_host fusion_data{};
                 fusion_data.gate      = gate->src[0];
+                fusion_data.n_slots   = ggml_get_op_params_i32(up, 2);
                 fusion_data.glu_op    = ggml_get_glu_op(glu);
                 fusion_data.glu_limit = ggml_get_op_params_f32(glu, 3);
 

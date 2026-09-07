@@ -368,6 +368,8 @@ struct cmd_params {
     std::vector<bool>                no_host;
     std::vector<size_t>              fit_params_target;
     std::vector<uint32_t>            fit_params_min_ctx;
+    int                              n_moe_cache_slots;
+    int                              n_moe_cache_inserts;
     ggml_numa_strategy               numa;
     int                              reps;
     ggml_sched_priority              prio;
@@ -413,6 +415,8 @@ static const cmd_params cmd_params_defaults = {
     /* no_host              */ { false },
     /* fit_params_target    */ { 0 },
     /* fit_params_min_ctx   */ { 0 },
+    /* n_moe_cache_slots    */ 0,
+    /* n_moe_cache_inserts  */ 2,
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
     /* reps                 */ 5,
     /* prio                 */ GGML_SCHED_PRIO_NORMAL,
@@ -471,6 +475,8 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  --poll <0...100>                                  (default: %s)\n", join(cmd_params_defaults.poll, ",").c_str());
     printf("  -ngl, --n-gpu-layers <n>                          (default: %s)\n", join(cmd_params_defaults.n_gpu_layers, ",").c_str());
     printf("  -ncmoe, --n-cpu-moe <n>                           (default: %s)\n", join(cmd_params_defaults.n_cpu_moe, ",").c_str());
+    printf("  --moe-expert-cache <n>                             (default: %d)\n", cmd_params_defaults.n_moe_cache_slots);
+    printf("  --moe-expert-cache-inserts <n>                     (default: %d)\n", cmd_params_defaults.n_moe_cache_inserts);
     printf("  -sm, --split-mode <none|layer|row|tensor>         (default: %s)\n", join(transform_to_str(cmd_params_defaults.split_mode, split_mode_str), ",").c_str());
     printf("  -mg, --main-gpu <i>                               (default: %s)\n", join(cmd_params_defaults.main_gpu, ",").c_str());
     printf("  -nkvo, --no-kv-offload <0|1>                      (default: %s)\n", join(cmd_params_defaults.no_kv_offload, ",").c_str());
@@ -732,6 +738,18 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = parse_int_range(argv[i]);
                 params.n_cpu_moe.insert(params.n_cpu_moe.end(), p.begin(), p.end());
+            } else if (arg == "--moe-expert-cache") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                params.n_moe_cache_slots = std::stoi(argv[i]);
+            } else if (arg == "--moe-expert-cache-inserts") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                params.n_moe_cache_inserts = std::stoi(argv[i]);
             } else if (llama_supports_rpc() && (arg == "-rpc" || arg == "--rpc")) {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1264,6 +1282,8 @@ struct cmd_params_instance {
     bool               no_host;
     size_t             fit_target;
     uint32_t           fit_min_ctx;
+    int                n_moe_cache_slots;
+    int                n_moe_cache_inserts;
 
     llama_model_params to_llama_mparams() const {
         llama_model_params mparams = llama_model_default_params();
@@ -1340,6 +1360,8 @@ struct cmd_params_instance {
         cparams.embeddings      = embeddings;
         cparams.op_offload      = !no_op_offload;
         cparams.swa_full        = false;
+        cparams.n_moe_cache_slots   = n_moe_cache_slots;
+        cparams.n_moe_cache_inserts = n_moe_cache_inserts;
 
         return cparams;
     }
@@ -1409,6 +1431,8 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .no_host               = */ noh,
                 /* .fit_target            = */ fpt,
                 /* .fit_min_ctx           = */ fpc,
+                /* .n_moe_cache_slots     = */ params.n_moe_cache_slots,
+                /* .n_moe_cache_inserts   = */ params.n_moe_cache_inserts,
             };
             instances.push_back(instance);
         }
@@ -1446,6 +1470,8 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .no_host               = */ noh,
                 /* .fit_target            = */ fpt,
                 /* .fit_min_ctx           = */ fpc,
+                /* .n_moe_cache_slots     = */ params.n_moe_cache_slots,
+                /* .n_moe_cache_inserts   = */ params.n_moe_cache_inserts,
             };
             instances.push_back(instance);
         }
@@ -1483,6 +1509,8 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .no_host               = */ noh,
                 /* .fit_target            = */ fpt,
                 /* .fit_min_ctx           = */ fpc,
+                /* .n_moe_cache_slots     = */ params.n_moe_cache_slots,
+                /* .n_moe_cache_inserts   = */ params.n_moe_cache_inserts,
             };
             instances.push_back(instance);
         }

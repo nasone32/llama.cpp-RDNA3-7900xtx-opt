@@ -10,8 +10,8 @@
 //
 // Mechanism (no custom kernels):
 //  - per cached layer, companion tensors up_c/gate_c/down_c of shape
-//    [ne0, ne1, n_slots+1] live in the device buffer of that layer's router;
-//    slot n_slots is permanently zero (the "dummy" slot).
+//    [ne0, ne1, n_slots+n_dummy] live in the device buffer of that layer's router;
+//    slots after n_slots are permanently zero (the "dummy" slots).
 //  - an I32 table[512] maps expert id -> slot, or n_slots when uncached.
 //    One copy on device (read by get_rows to remap ids for the cache-side
 //    mul_mat_id chain) and one on host (read by the CPU mul_mat_id via
@@ -19,28 +19,30 @@
 //  - the two down-projection outputs are summed; uncached ids contribute 0
 //    through the cache chain (zero slot) and cached ids contribute 0 through
 //    the CPU chain (skip), so the result is exact.
-//  - llama_moe_cache_step(), called at the end of llama_context::decode(),
+//  - llama_moe_cache_step(), called after graph synchronization,
 //    performs throttled LRU updates: at most LLAMA_MOE_CACHE_INSERTS expert
-//    uploads per layer per step via ggml_backend_tensor_set.
+//    uploads per layer per step on dedicated backend streams.
 //
 // Enabled via llama_context_params.n_moe_cache_slots (CLI: --moe-expert-cache).
 
 #include <cstdint>
 
 struct llama_model;
+struct llama_context;
 struct ggml_tensor;
 
 struct llama_moe_cache_layer {
     int il = -1;
 
     int32_t n_slots = 0;
+    int32_t n_dummy = 0;
 
     // host-resident source weights (the authoritative experts)
     ggml_tensor * up_src   = nullptr;
     ggml_tensor * gate_src = nullptr;
     ggml_tensor * down_src = nullptr;
 
-    // device-resident cache slots, ne[2] == n_slots + 1 (last slot all zeros)
+    // device-resident cache slots followed by n_dummy zero slots
     ggml_tensor * up_c   = nullptr;
     ggml_tensor * gate_c = nullptr;
     ggml_tensor * down_c = nullptr;
@@ -51,8 +53,11 @@ struct llama_moe_cache_layer {
 };
 
 // build the cache for every host-resident expert layer of the model.
-// Safe to call more than once; only the first call does work.
-void llama_moe_cache_init(const llama_model & model, int32_t n_slots, int32_t max_inserts);
+// Returns true when the calling context owns the cache.
+bool llama_moe_cache_init(const llama_model & model, const llama_context & ctx, int32_t n_slots, int32_t max_inserts);
+
+void llama_moe_cache_free(const llama_context & ctx);
+void llama_moe_cache_free(const llama_model & model);
 
 // nullptr when the cache is disabled or this tensor has no cached layer
 const llama_moe_cache_layer * llama_moe_cache_lookup(const ggml_tensor * up_exps);

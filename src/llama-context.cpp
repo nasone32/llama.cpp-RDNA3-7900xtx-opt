@@ -93,8 +93,6 @@ llama_context::llama_context(
     //     may need to be backend-dependent
     LLAMA_LOG_INFO("%s: constructing llama_context\n", __func__);
 
-    llama_moe_cache_init(model, params.n_moe_cache_slots, params.n_moe_cache_inserts);
-
     t_start_us = model.t_start_us;
     t_load_us  = model.t_load_us;
 
@@ -114,6 +112,7 @@ llama_context::llama_context(
 
     cparams.n_threads               = params.n_threads;
     cparams.n_threads_batch         = params.n_threads_batch;
+    cparams.n_moe_cache_slots       = 0;
     cparams.yarn_ext_factor         = params.yarn_ext_factor  >= 0.0f ? params.yarn_ext_factor  : hparams.yarn_ext_factor;
     cparams.yarn_attn_factor        = params.yarn_attn_factor >= 0.0f ? params.yarn_attn_factor : hparams.yarn_attn_factor;
     cparams.yarn_beta_fast          = params.yarn_beta_fast   >= 0.0f ? params.yarn_beta_fast   : hparams.yarn_beta_fast;
@@ -488,29 +487,35 @@ llama_context::llama_context(
             LLAMA_LOG_INFO("%s: pipeline parallelism enabled\n", __func__);
         }
 
-        sched_reserve();
-
         if (!cparams.flash_attn) {
             if (ggml_is_quantized(params.type_v)) {
                 throw std::runtime_error("quantized V cache was requested, but this requires Flash Attention");
             }
         }
-    }
 
-    // Initialize the full vocabulary token ids for backend samplers.
-    {
         const int n_vocab = model.vocab.n_tokens();
-
         sampling.token_ids_full_vocab.resize(n_vocab);
         for (int i = 0; i < n_vocab; ++i) {
             sampling.token_ids_full_vocab[i] = i;
         }
+
+        const bool moe_cache_enabled = llama_moe_cache_init(model, *this, params.n_moe_cache_slots, params.n_moe_cache_inserts);
+        cparams.n_moe_cache_slots = moe_cache_enabled ? params.n_moe_cache_slots : 0;
+
+        try {
+            sched_reserve();
+        } catch (...) {
+            llama_moe_cache_free(*this);
+            throw;
+        }
     }
+
 }
 
 llama_context::~llama_context() {
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
+    llama_moe_cache_free(*this);
 
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
@@ -746,6 +751,9 @@ void llama_context::synchronize() {
     }
 
     ggml_backend_sched_synchronize(sched.get());
+    if (cparams.n_moe_cache_slots > 0) {
+        llama_moe_cache_step();
+    }
 
     // FIXME: if multiple single tokens are evaluated without a synchronization,
     // the stats will be added to the prompt evaluation stats
@@ -2061,9 +2069,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     // wait for the computation to finish (automatically done when obtaining the model output)
     //synchronize();
-
-    // apply throttled MoE expert-cache updates between graph executions
-    llama_moe_cache_step();
 
     return 0;
 }
