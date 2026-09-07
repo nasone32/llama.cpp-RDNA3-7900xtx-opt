@@ -2,7 +2,7 @@
 
 This is the llama.cpp build I use for Qwen on AMD RDNA3.
 
-It is not a clean upstream build and it is not meant to be one. It pulls together AMD patches originally written for RDNA3.5 but compatible with RDNA3, experimental llama.cpp work that has not landed upstream yet, the RDNA Boost patch series, and a few changes made specifically for this setup.
+It is a concoction of PRs, some AMD patches originally written for RDNA3.5 but compatible with RDNA3, experimental llama.cpp work that has not landed upstream yet, the RDNA Boost patch series, and a few changes made specifically for this setup.
 
 So far it has been tested on Linux with ROCm using:
 
@@ -28,11 +28,11 @@ These are measured results, not guaranteed numbers. Model quantization, prompt l
 
 - RDNA3 and RDNA3.5 kernel tuning for flash attention, TOP_K, MMQ, MMVQ, GDN, and routed MoE workloads.
 - Internal two-GPU HIP AllReduce and peer-to-peer transfers, without RCCL.
-- Optional Q8_0 wire format for inter-GPU AllReduce. This cuts PCIe traffic for large tensors instead of sending the full F32 payload.
+- Optional Q8_0 between cards for inter-GPU AllReduce. This cuts PCIe traffic.
 - Fused AllReduce plus residual add, which avoids another full pass over the activation.
-- Faster Qwen3.8 Flash prefill through direct lazy loading and the chunked BF16 gated-delta-net path.
+- Faster Qwen3.8 Flash prefill through "direct lazy loading" of Ngram tables, and the "chunked BF16 gated-delta-net".
 - Adaptive MTP draft depth.
-- Experimental GPU-resident MoE expert cache, with additional work to remove overhead from the original implementation.
+- Experimental MoE expert cache, with additional work to remove overhead from the original implementation.
 
 ## Extra options in this build
 
@@ -63,9 +63,9 @@ This combination makes a big difference to prompt processing on Qwen3.8 Flash. I
 
 The cache keeps recently used, host-offloaded MoE experts in VRAM. This can improve decode when system RAM bandwidth is the bottleneck.
 
-I personally run with `--moe-expert-cache 0` because on my workload the prompt-processing slowdown costs more than the decode gain. The feature is still included, and this fork removes a good chunk of overhead from the original PR: faster all-hit handling, skipped dummy GPU work, asynchronous expert uploads, fewer mapping-table copies, and protection against duplicate in-flight uploads.
+I personally run with `--moe-expert-cache 0` because on my workload the prompt-processing slows down to a crawl and I find it unusable. BUT The feature is still included, and this fork removes a good chunk of overhead from the original PR (i might push it there also).
 
-Cache size is hardware and model dependent. Start low, watch VRAM usage, and increase it only if the tradeoff makes sense for your workload.
+Cache size is hardware and model dependent. Start low, watch VRAM usage, and increase it. more cached experts = more speed. with 288 expert you get a 95% hit rate so things can decode fast, i've seen 45tk/s with MTP, but decode isn't everything
 
 ## Applied series
 
