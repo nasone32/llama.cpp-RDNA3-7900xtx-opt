@@ -204,7 +204,7 @@ export GGML_CUDA_AR_P2P_ISSUER=1
     --port 8080 \
     --ctx-size 50144 \
     --spec-type draft-mtp-adaptive \
-    --spec-draft-n-max 3 \
+    --spec-draft-n-max 4 \
     --device-draft ROCm0 \
     --split-mode tensor \
     --flash-attn on \
