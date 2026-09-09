@@ -321,6 +321,16 @@ The 288-slot default is the largest comfortably tested value at this context siz
 
 This mode improves decode when host RAM bandwidth is the bottleneck, but prompt processing is slower because the experts are offloaded. Use the non-cache MoE example above when prompt-processing speed matters more.
 
+## windows users
+
+A user on reddit reported this fix is needed to make it work under windows, leaving it here:
+
+u/Sarmatian_Ambassador
+
+"I wanted to test this out, but had issues compiling it under Windows as opposed to standard llama.cpp build. Something about a call to undeclared function 'flockfile'. So I edited \ggml\src\ggml-cpu\ggml-cpu.c and added the following two lines:
+#define flockfile(x) _lock_file(x)
+#define funlockfile(x) _unlock_file(x) 
+
 ## Credits
 
 This fork is based on [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) and combines work from upstream llama.cpp contributors, AMD ROCm contributors, experimental pull requests, and the RDNA Boost series. Check the commit history for authorship and the exact changes carried by this branch.
