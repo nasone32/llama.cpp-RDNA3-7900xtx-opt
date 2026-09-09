@@ -202,7 +202,7 @@ export GGML_CUDA_AR_P2P_ISSUER=1
     --alias qwen3.8-27b \
     --host 0.0.0.0 \
     --port 8080 \
-    --ctx-size 50144 \
+    --ctx-size 150000 \
     --spec-type draft-mtp-adaptive \
     --spec-draft-n-max 4 \
     --device-draft ROCm0 \
@@ -211,8 +211,6 @@ export GGML_CUDA_AR_P2P_ISSUER=1
     --batch-size 4096 \
     --ubatch-size 1024 \
     --moe-expert-cache 0 \
-    --cache-type-k q8_0 \
-    --cache-type-v q8_0 \
     --temp 0.6 \
     --top-p 0.95 \
     --top-k 20 \
@@ -222,9 +220,7 @@ export GGML_CUDA_AR_P2P_ISSUER=1
     --reasoning-effort medium \
     --parallel 1 \
     --fit on \
-    --fit-target 2800,2048 \
     --load-mode none \
-    --lazy-mode on-direct
 ```
 
 The Qwen3.8 27B `Q8_0` GGUF tested here already contains its MTP weights, so it does not need a separate `--model-draft` file. `--fit-target 2800,2048` deliberately leaves more headroom on `ROCm0` for MTP. The display is on `ROCm1` in this setup, so your own memory targets may need to be different.
