@@ -202,7 +202,7 @@ export GGML_CUDA_AR_P2P_ISSUER=1
     --alias qwen3.8-27b \
     --host 0.0.0.0 \
     --port 8080 \
-    --ctx-size 150000 \
+    --ctx-size 180000 \
     --spec-type draft-mtp-adaptive \
     --spec-draft-n-max 4 \
     --device-draft ROCm0 \
